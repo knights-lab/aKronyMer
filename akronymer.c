@@ -1,5 +1,5 @@
-#define VER "v0.91"
-#define USAGE "usage: aKronyMer inseqs.lin.fna output.txt [K] [TREE]"
+#define VER "v0.92"
+#define USAGE "usage: aKronyMer inseqs.lin.fna output [K] [GLOBAL] [ADJ] [TREE]"
 #include <stdio.h>
 #include <inttypes.h>
 #include <string.h>
@@ -46,7 +46,12 @@ void main(int argc, char *argv[]) {
 	uint64_t totL = 0, N;
 	int doTree = argc >= 4 && !strcmp(argv[argc-1],"TREE"); 
 	argc -= doTree;
-	printf("Goal: output %s.\n",doTree ? "tree" : "distance matrix");
+	int adj = argc >= 4 && !strcmp(argv[argc-1],"ADJ");
+	argc -= adj;
+	int global = argc >= 4 && !strcmp(argv[argc-1],"GLOBAL");
+	argc -= global;
+	printf("Goal: output %s %s %s.\n", adj ? "adjusted" : "raw", global ? 
+		"global" : "glocal", doTree ? "tree" : "distance matrix");
 	char **HeadPack = malloc(profSz*sizeof(*HeadPack));
 	uint32_t *Lens = malloc(profSz*sizeof(*Lens));
 	if (!(head && seq && HeadPack && Lens)) 
@@ -200,12 +205,12 @@ void main(int argc, char *argv[]) {
 					}
 					//for (uint32_t z = 0; z < FPSZ; ++z)
 					//	its += _mm_popcnt_u64(F[z] & S[z]);
-					D[j][k] = 1.f - (float)its / 
+					if (global) D[j][k] = 1.f - (float)its / 
+						(Pops[j] > Pops[k] ? Pops[j] : Pops[k]); 
+					else D[j][k] = 1.f - (float)its / 
 						(Pops[j] < Pops[k] ? Pops[j] : Pops[k]); 
 				}
 			}
-			// Jukes-Cantor/LBA fix goes here! 
-			//  ...
 		} else { // K = 4 special case (no z loop)
 			#pragma omp parallel for schedule(guided)
 			for (uint32_t j = 1; j < N; ++j) {
@@ -221,6 +226,20 @@ void main(int argc, char *argv[]) {
 						(Pops[j] < Pops[k] ? Pops[j] : Pops[k]);
 				}
 			}
+		}
+		if (adj) { // LBA fix 
+			float s = (uint64_t)1 << (K << 1), s_r = 1.f/s;
+			#pragma omp parallel for schedule(guided)
+			for (uint32_t j = 1; j < N; ++j) 
+				for (uint32_t k = 0; k < j; ++k) {
+					uint32_t h, l;
+					if (Pops[j] > Pops[k]) h = Pops[j], l = Pops[k];
+					else h = Pops[k], l = Pops[j];
+					//float x = s/(float)(global ? l : h), c = x*D[j][k];
+					//D[j][k] = c <= .95f ? -logf(1.f-c) : 3.f;
+					float rs = (float)(global ? l : h)*s_r, rd = 1.f - rs;
+					D[j][k] = D[j][k] >= rd ? 1 : (D[j][k] - rd)/rs;
+				}
 		}
 		free(ProfDump); free(ProfPack); free(Pops);
 		printf("Calculated distance matrix [%f]\n",omp_get_wtime()-wtime);
@@ -391,7 +410,8 @@ void main(int argc, char *argv[]) {
 					mi = Row_IXs[x], mj=Col_IXs[x]+x; 
 			} */
 			#endif
-			
+			if (mj >= mi || mj >= n) {printf("ERR MJ: mi %u, mj %u\n",mi, mj);}
+			if (!mi || mi >=n) printf("ERR MI: mi %u, mj %u\n", mi, mj);
 			float md = D[mi][mj], b1 = 0.5f * (md + (R[mi]-R[mj])), 
 				b2 = md - b1, md2 = 0.5f * md; // new branch lengths
 			
