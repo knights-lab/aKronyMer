@@ -1,5 +1,5 @@
-#define VER "v0.92"
-#define USAGE "usage: aKronyMer inseqs.lin.fna output [K] [GLOBAL] [ADJ] [TREE]"
+#define VER "v0.93"
+#define USAGE "usage: aKronyMer inseqs.lin.fna output [K] [GLOBAL/DIRECT] [ADJ] [TREE]"
 #include <stdio.h>
 #include <inttypes.h>
 #include <string.h>
@@ -50,8 +50,10 @@ void main(int argc, char *argv[]) {
 	argc -= adj;
 	int global = argc >= 4 && !strcmp(argv[argc-1],"GLOBAL");
 	argc -= global;
-	printf("Goal: output %s %s %s.\n", adj ? "adjusted" : "raw", global ? 
-		"global" : "glocal", doTree ? "tree" : "distance matrix");
+	int direct = argc >= 4 && !strcmp(argv[argc-1],"DIRECT");
+	argc -= direct;
+	printf("Goal: output %s %s %s\n", adj ? "adjusted" : "raw", global ? "global"
+		: direct ? "direct" : "glocal", doTree ? "tree" : "distance matrix");
 	char **HeadPack = malloc(profSz*sizeof(*HeadPack));
 	uint32_t *Lens = malloc(profSz*sizeof(*Lens));
 	if (!(head && seq && HeadPack && Lens)) 
@@ -80,7 +82,7 @@ void main(int argc, char *argv[]) {
 			if (!HeadPack || !Lens) {fputs("OOM:HeadPack\n",stderr); exit(3);}
 		}
 	}
-	uint32_t sugK = (31-__builtin_clz((totL+totL)/(N=i)))/2u; //clz(totL/(N=i)+maxL)
+	uint32_t sugK = (31-__builtin_clz((totL+totL)/(N=i)))/2u + 1; //clz(totL/(N=i)+maxL)
 	printf("Avg. length: %lu, max = %lu. Sugg. K = %u\n", totL/N, maxL, sugK);
 	if (N < 2) {fputs("Sorry, need > 1 sequence!\n",stderr); exit(1);}
 	uint32_t K = argc > 3 ? atoi(argv[3]) : sugK, PSZ, K1, FPSZ;
@@ -205,10 +207,20 @@ void main(int argc, char *argv[]) {
 					}
 					//for (uint32_t z = 0; z < FPSZ; ++z)
 					//	its += _mm_popcnt_u64(F[z] & S[z]);
-					if (global) D[j][k] = 1.f - (float)its / 
-						(Pops[j] > Pops[k] ? Pops[j] : Pops[k]); 
-					else D[j][k] = 1.f - (float)its / 
-						(Pops[j] < Pops[k] ? Pops[j] : Pops[k]); 
+					float denom;
+					if (direct) denom = Pops[j] + Pops[k] - its;
+					else { 
+						uint32_t h, l;
+						if (Pops[j] > Pops[k]) h = Pops[j], l = Pops[k];
+						else h = Pops[k], l = Pops[j];
+						denom = global ? h : l;
+					}
+					D[j][k] = 1.f - (float)its / denom;
+					// old
+					// if (global) D[j][k] = 1.f - (float)its / 
+						// (Pops[j] > Pops[k] ? Pops[j] : Pops[k]); 
+					// else D[j][k] = 1.f - (float)its / 
+						// (Pops[j] < Pops[k] ? Pops[j] : Pops[k]); 
 				}
 			}
 		} else { // K = 4 special case (no z loop)
@@ -222,8 +234,15 @@ void main(int argc, char *argv[]) {
 						p1 = _mm_popcnt_u64(a1), p2 = _mm_popcnt_u64(a2),
 						p3 = _mm_popcnt_u64(a3), p4 = _mm_popcnt_u64(a4);
 					uint64_t its = p1+p2+p3+p4; 
-					D[j][k] = 1.f - (float)its / 
-						(Pops[j] < Pops[k] ? Pops[j] : Pops[k]);
+					float denom;
+					if (direct) denom = Pops[j] + Pops[k] - its;
+					else { 
+						uint32_t h, l;
+						if (Pops[j] > Pops[k]) h = Pops[j], l = Pops[k];
+						else h = Pops[k], l = Pops[j];
+						denom = global ? h : l;
+					}
+					D[j][k] = 1.f - (float)its / denom;
 				}
 			}
 		}
@@ -232,13 +251,17 @@ void main(int argc, char *argv[]) {
 			#pragma omp parallel for schedule(guided)
 			for (uint32_t j = 1; j < N; ++j) 
 				for (uint32_t k = 0; k < j; ++k) {
-					uint32_t h, l;
-					if (Pops[j] > Pops[k]) h = Pops[j], l = Pops[k];
-					else h = Pops[k], l = Pops[j];
-					//float x = s/(float)(global ? l : h), c = x*D[j][k];
-					//D[j][k] = c <= .95f ? -logf(1.f-c) : 3.f;
-					float rs = (float)(global ? l : h)*s_r, rd = 1.f - rs;
-					D[j][k] = D[j][k] >= rd ? 1 : (D[j][k] - rd)/rs;
+					float nu;
+					if (direct) nu = (float)Pops[j]*Pops[k]/(Pops[j]+Pops[k]);
+						//Pops[j]+Pops[k]-its
+					else {
+						uint32_t h, l;
+						if (Pops[j] > Pops[k]) h = Pops[j], l = Pops[k];
+						else h = Pops[k], l = Pops[j];
+						nu = global ? l : h;
+					}
+					float rd = 1.f - nu*s_r;
+					D[j][k] = D[j][k] >= rd ? 1 : D[j][k]/rd;
 				}
 		}
 		free(ProfDump); free(ProfPack); free(Pops);
@@ -476,7 +499,8 @@ void main(int argc, char *argv[]) {
 	
 	for (uint32_t j = 0; j < N; ++j) fprintf(of,"\t%s",HeadPack[j]);
 	fputc('\n',of);
-	float *FC = malloc(N*sizeof(*FC));
+	float *FC = malloc(N*sizeof(*FC)),
+		s = (uint64_t)1 << (K << 1), s_r = 1.f/s;
 	for (uint32_t j = 0; j < N; ++j) {
 		uint64_t *F = ProfPack[j];
 		fprintf(of,"%s",HeadPack[j]);
@@ -486,7 +510,29 @@ void main(int argc, char *argv[]) {
 			uint32_t its = 0;
 			for (uint32_t z = 0; z < FPSZ; ++z)
 				its += _mm_popcnt_u64(F[z] & S[z]);
-			FC[k] = (double)its/(Pops[j] < Pops[k] ? Pops[j] : Pops[k]);
+			//FC[k] = (double)its/(Pops[j] < Pops[k] ? Pops[j] : Pops[k]);
+			float denom;
+			if (direct) denom = Pops[j] + Pops[k] - its;
+			else { 
+				uint32_t h, l;
+				if (Pops[j] > Pops[k]) h = Pops[j], l = Pops[k];
+				else h = Pops[k], l = Pops[j];
+				denom = global ? h : l;
+			}
+			FC[k] = 1.f - (float)its / denom;
+			if (adj) { // LBA fix 
+				float nu;
+				if (direct) nu = (float)Pops[j]*Pops[k]/(Pops[j]+Pops[k]);
+					//Pops[j]+Pops[k]-its
+				else {
+					uint32_t h, l;
+					if (Pops[j] > Pops[k]) h = Pops[j], l = Pops[k];
+					else h = Pops[k], l = Pops[j];
+					nu = global ? l : h;
+				}
+				float rd = 1.f - nu*s_r;
+				FC[k] = FC[k] >= rd ? 1 : FC[k]/rd;
+			}
 		}
 		for (uint32_t k = 0; k < j; ++k) fprintf(of,"\t%.4f",FC[k]);
 		fputs("\t1.000\n",of);
