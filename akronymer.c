@@ -1,5 +1,5 @@
 #define VER "v0.94"
-#define USAGE "usage: aKronyMer inseqs.lin.fna output [K] [HEUR[1-4]] [ADJ] [GLOBAL/DIRECT] [TREE]"
+#define USAGE "usage: aKronyMer inseqs.lin.fna output [K] [HEUR[0-9]] [ADJ] [GLOBAL/DIRECT] [TREE]"
 #include <stdio.h>
 #include <inttypes.h>
 #include <string.h>
