@@ -17,7 +17,7 @@ grep -B1 --no-group-separator 'GC.ATGGATGAGCA.*TTC.ACTTC.GT.G' shi7/combined_seq
 # 3. Filter for desired amplicon length(s)
   #(optional: check lengths):
   awk '!(NR % 2) {print length}' combined_seqs_np.fna | sort | uniq -c | sort -rh | head -50
-awk '{if (!(NR % 2) && length > 355 && length < 370) {print x; print $0}; x=$0}' combined_seqs_np.fna > manicured.fna
+awk '{if (!(NR % 2) && length > $TOO_SHORT && length < $TOO_LONG) {print x; print $0}; x=$0}' combined_seqs_np.fna > manicured.fna
 
 # 4. Create some "seed sets" to determine proper ref set cutoff (refine if desired)
 for i in 002 003 005 010 025 050 100; do ninja_filter_linux manicured.fna D$i D $i && rm D$i.db; done
