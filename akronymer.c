@@ -1,4 +1,4 @@
-#define VER "v0.94"
+#define VER "v0.95"
 #define USAGE "usage: aKronyMer inseqs.lin.fna output [K] [HEUR[0-9]] [ADJ] [GLOBAL/DIRECT] [TREE]"
 #include <stdio.h>
 #include <inttypes.h>
@@ -283,6 +283,7 @@ void main(int argc, char *argv[]) {
 					}
 					float rd = 1.f - nu*s_r;
 					D[j][k] = D[j][k] >= rd ? 1 : D[j][k]/rd;
+					D[j][k] = D[j][k] <= .9999546f ? -logf(1-D[j][k]) : 10.f;
 				}
 		}
 		free(ProfDump); free(ProfPack); free(Pops);
@@ -423,6 +424,7 @@ void main(int argc, char *argv[]) {
 			if (!mi || mi >=n) printf("ERR MI: mi %u, mj %u\n", mi, mj);
 			float md = D[mi][mj], b1 = 0.5f * (md + (R[mi]-R[mj])), 
 				b2 = md - b1, md2 = 0.5f * md; // new branch lengths
+			if ()
 			
 			// Both node lengths, two colons, a comma, two bounding parentheses, 
 			// 2 7-char numbers (controlled with %.5f), 2 neg signs, and a null = 22
@@ -516,9 +518,10 @@ void main(int argc, char *argv[]) {
 				}
 				float rd = 1.f - nu*s_r;
 				FC[k] = FC[k] >= rd ? 1 : FC[k]/rd;
+				FC[k] = FC[k] <= .9999546f ? -logf(1-FC[k]) : 10.f;
 			}
 		}
 		for (uint32_t k = 0; k < j; ++k) fprintf(of,"\t%.4f",FC[k]);
-		fputs("\t1.000\n",of);
+		//fputs("\t1.000\n",of); // omit?
 	}
 }
