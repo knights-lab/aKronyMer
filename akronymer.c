@@ -424,7 +424,7 @@ void main(int argc, char *argv[]) {
 			if (!mi || mi >=n) printf("ERR MI: mi %u, mj %u\n", mi, mj);
 			float md = D[mi][mj], b1 = 0.5f * (md + (R[mi]-R[mj])), 
 				b2 = md - b1, md2 = 0.5f * md; // new branch lengths
-			if ()
+			//if () // allow option to not make rooted
 			
 			// Both node lengths, two colons, a comma, two bounding parentheses, 
 			// 2 7-char numbers (controlled with %.5f), 2 neg signs, and a null = 22
@@ -522,6 +522,7 @@ void main(int argc, char *argv[]) {
 			}
 		}
 		for (uint32_t k = 0; k < j; ++k) fprintf(of,"\t%.4f",FC[k]);
+		fputs("\n",of);
 		//fputs("\t1.000\n",of); // omit?
 	}
 }
