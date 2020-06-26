@@ -1,5 +1,5 @@
-#define VER "v0.95"
-#define USAGE "usage: aKronyMer inseqs.lin.fna output [K] [HEUR[0-9]] [ADJ] [GLOBAL/DIRECT] [TREE]"
+#define VER "v1.00"
+#define USAGE "usage: aKronyMer inseqs.lin.fna output [K] [Q queries.lin.fna [MIN2]] [HEUR[0-9]] [ANI] [CHANCE] [GC] [ADJ] [GLOBAL/DIRECT/LOCAL] [TREE/SETCLUSTER] [RC] [NOCUT]"
 #include <stdio.h>
 #include <inttypes.h>
 #include <string.h>
@@ -8,8 +8,17 @@
 #include <immintrin.h>
 #include <float.h>
 #include <math.h>
-const uint8_t CONV[32] = {7,0,7,1,7,7,7,2,7,7,7,7,7,7,7,7,7,7,7,7,3,3,7,7,7,7,7,7,7,7,7,7};
+#ifndef __SSE4_2__
+	#define _mm_popcnt_u64 __builtin_popcountll
+#endif
+//                           A   C       G                         T U
+const uint8_t CONV[32]  = {4,0,4,1,4,4,4,2,4,4,4,4,4,4,4,4,4,4,4,4,3,3,4,4,4,4,4,4,4,4,4,4};
+//                         0 0 0 0 0 Z Y X W V U T S R Q P O N M L K J I H G F E D C B A 0
+const uint8_t RCONV[32] = {4,3,4,2,4,4,4,1,4,4,4,4,4,4,4,4,4,4,4,4,0,0,4,4,4,4,4,4,4,4,4,4};
 __m128i MSK[16];
+
+double K_recip, rspace;
+uint64_t Kspace_denom;
 
 void * malloc_a(size_t algn, size_t size, void **oldPtr) {
 	uintptr_t mask = ~(uintptr_t)(algn - 1);
@@ -17,23 +26,87 @@ void * malloc_a(size_t algn, size_t size, void **oldPtr) {
 	return (void *)(((uintptr_t)*oldPtr+algn-1) & mask);
 }
 
+static inline double calc_dist(uint32_t pop1, uint32_t pop2, double gc1, double gc2, int its, int unn, 
+int doChance, int doGC, int ani, int direct, int adj, int global, int local) {
+	uint32_t l = pop1, h = pop2, t;
+	if (l > h) t = l, l= h, h = t;
+	//double tF, hGC = gc1, lGC = gc2; 
+	//if (hGC < lGC) tF = hGC, hGC = lGC, lGC = tF;
+	
+	// Distance calculation
+	double chance = 0., forceps = 0.;
+	if (doChance) {
+		if (doGC) {
+			double gc1x = 2.0*(gc1-.5), gc2x = 2.0*(gc2-.5), tF;
+			double gc1gc2 = gc1x*gc2x;
+			double convergent = gc1gc2 > 0.;
+			double p1x = rspace*pop1, p2x = rspace*pop2;
+
+			double absWorseGC = gc1x < 0 ? -gc1x : gc1x, absBetterGC = gc2x < 0 ? -gc2x: gc2x; 
+			double wGCpop = p1x, bGCpop = p2x;
+			if (absWorseGC < absBetterGC) tF = absWorseGC, absWorseGC = absBetterGC, absBetterGC=tF,
+				wGCpop = p2x, bGCpop = p1x;
+			
+			double naiveI = p1x + p2x - (1.-(1.-p1x)*(1.-p2x));
+			double logNaiveI = naiveI > 0 ? log(naiveI) : log(rspace);
+
+			double logInt = -0.059930023639 + 8.80552018132*gc1gc2 + 0.982605251473*logNaiveI + 
+				-10.698650968033*absWorseGC*bGCpop*gc1gc2 + -10.096185620097*convergent*absBetterGC*gc1gc2 + 
+				-0.6996572809*absBetterGC*gc1gc2*logNaiveI + 41.38264645886*absBetterGC*absWorseGC*naiveI + 
+				0.779298577831*absBetterGC*bGCpop*logNaiveI + -4.26363078487*convergent*absWorseGC*wGCpop + 
+				0.307017388822*absBetterGC*absWorseGC*logNaiveI + 0.195881822435*convergent + -31.798178947318*
+				absBetterGC*wGCpop*naiveI + -13.147853260478*absWorseGC*wGCpop*gc1gc2 + 1.922706924807*
+				convergent*absBetterGC;
+			chance = exp(logInt)*Kspace_denom;
+		}
+		else chance = rspace * (double)l * (double)h;
+	}
+	//double adj1 = pow(.1/(1.0 - betterGC),1.33)*21.9796; // convergence boost
+		
+	//printf("Chance multiplier for pop1 %u, pop2 %u, hGC %f, lGC %f, its %d, unn %d = %.0f [orig %.0f]\n",
+	//	pop1,pop2,gc1,gc2,its,unn, chance,rspace*pop1*pop2);
+	
+		chance = chance > its ? its : chance;
+	//printf("%u\t%u\t%f\t%f\t%d\t%d\t%f\t%f\t%f\t%f\n",
+	//	pop1,pop2,hGC,lGC,its,unn, chance,rspace*pop1*pop2,betterGC,worstGC);
+	//printf("%f\t%f\t%f\t%f\t%f\n",gc1,gc2,1-rspace*pop1, 1-rspace*pop2,1-rspace*unn);
+	//printf("%f\t%f\t%g\t%g\t%g\n",gc1,gc2,rspace*pop1, rspace*pop2,rspace*its);
+	double denom;
+	if (ani) {
+		// adjust numerator and denominator here
+		double fudge = local ? (double)l/(double)h : 1.0;
+		denom = unn * fudge;
+		its -= chance;
+		denom -= chance * fudge;
+	}
+	else if (direct) denom = h + l - its;
+	else denom = global ? h : l; // global, glocal
+	denom = denom > 1. ? denom : 1.;
+	
+	double sim = (double)its / denom, dist = 1.0 - sim;
+	if (ani) { // LBA fix 
+		if (!direct) {
+			dist = 1. - (1. + K_recip*log(2*sim/(1. + sim)));
+			if (adj) dist = dist < .75 ? -0.75*log(1.-(4./3)*dist) : 3,
+				dist = dist > 3 ? 3 : dist;
+			else dist = dist > 1 ? 1 : dist;
+		}
+		else if (adj) dist = dist <= .9999999 ? -log(1-dist) : 16.118096;
+	} 
+	else if (adj) {
+		double nu;
+		if (direct) nu = (double)h*l/(h+l);
+		else nu = global ? l : h;
+		double rd = 1. - nu*rspace;
+		dist = dist >= rd ? 1 : dist/rd;
+		dist = dist <= .9999999 ? -log(1-dist) : 16.118096;
+	}
+	return dist < 0 ? 0 : dist;
+}
 void main(int argc, char *argv[]) {
 	puts("This is aKronyMer " VER " by Gabe.");
-	MSK[15] = _mm_setr_epi8(-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1);
-	MSK[14] = _mm_setr_epi8(-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,0);
-	MSK[13] = _mm_setr_epi8(-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,0,0);
-	MSK[12] = _mm_setr_epi8(-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,0,0,0);
-	MSK[11] = _mm_setr_epi8(-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,0,0,0,0);
-	MSK[10] = _mm_setr_epi8(-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,0,0,0,0,0);
-	MSK[9] =  _mm_setr_epi8(-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,0,0,0,0,0,0);
-	MSK[8] =  _mm_setr_epi8(-1,-1,-1,-1,-1,-1,-1,-1,-1,0,0,0,0,0,0,0);
-	MSK[7] =  _mm_setr_epi8(-1,-1,-1,-1,-1,-1,-1,-1,0,0,0,0,0,0,0,0);
-	MSK[6] =  _mm_setr_epi8(-1,-1,-1,-1,-1,-1,-1,0,0,0,0,0,0,0,0,0);
-	MSK[5] =  _mm_setr_epi8(-1,-1,-1,-1,-1,-1,0,0,0,0,0,0,0,0,0,0);
-	MSK[4] =  _mm_setr_epi8(-1,-1,-1,-1,-1,0,0,0,0,0,0,0,0,0,0,0);
-	MSK[3] =  _mm_setr_epi8(-1,-1,-1,-1,0,0,0,0,0,0,0,0,0,0,0,0);
 	if (argc < 3) {puts(USAGE); exit(1);}
-	FILE *fp = fopen(argv[1],"rb");
+	FILE *fp = fopen(argv[1],"rb"), *f2 = 0;
 	if (!fp) {fprintf(stderr,"ERROR: input file I/O\n"); exit(1);}
 	FILE *of = fopen(argv[2],"wb");
 	if (!of) {fprintf(stderr,"ERROR: output file I/O\n"); exit(1);}
@@ -44,20 +117,49 @@ void main(int argc, char *argv[]) {
 	uint32_t i = 0, fx, profSz = 10, maxL = 0, THREADS = omp_get_max_threads(); 
 	printf("Using %u thread(s).\n",THREADS);
 	uint64_t totL = 0, N;
+	int noCut = argc >= 4 && !strcmp(argv[argc-1],"NOCUT"); 
+	argc -= noCut;
+	int doRC = argc >= 4 && !strcmp(argv[argc-1],"RC"); 
+	argc -= doRC;
 	int doTree = argc >= 4 && !strcmp(argv[argc-1],"TREE"); 
 	argc -= doTree;
+	int doSetClus = argc >= 4 && !strcmp(argv[argc-1],"SETCLUSTER"); 
+	argc -= doSetClus;
 	int global = argc >= 4 && !strcmp(argv[argc-1],"GLOBAL");
 	argc -= global;
 	int direct = argc >= 4 && !strcmp(argv[argc-1],"DIRECT");
 	argc -= direct;
+	int local = argc >= 4 && !strcmp(argv[argc-1],"LOCAL");
+	argc -= local;
 	int adj = argc >= 4 && !strcmp(argv[argc-1],"ADJ");
 	argc -= adj;
+	int doGC = argc >= 4 && !strcmp(argv[argc-1],"GC");
+	argc -= doGC;
+	int doChance = argc >= 4 && !strcmp(argv[argc-1],"CHANCE");
+	argc -= doChance;
+	int ani = argc >= 4 && !strcmp(argv[argc-1],"ANI");
+	argc -= ani;
 	char *hr = 0, hlv = 0;
 	int heur = argc >= 4 && (hr=strstr(argv[argc-1],"HEUR"));
 	argc -= heur;
+	int doMin2 = argc >=4 && !strcmp(argv[argc-1],"MIN2");
+	argc -= doMin2;
+	if (argc > 5 && !strcmp(argv[argc-2],"Q")) {
+		if (doTree || doSetClus) {
+			puts("Sorry, multi-file only supported for distance matrix output");
+			exit(2);
+		}
+		printf("Also using file 2: %s\n",argv[argc-1]);
+		f2 = fopen(argv[argc-1],"rb"), argc -=2;
+		if (!f2) {printf("Well that didn't work. I/O error\n"); exit(2);}
+		
+	}
+
 	if (hr) hlv = atoi(hr+4);
-	printf("Goal: output %s %s %s\n", adj ? "adjusted" : "raw", global ? "global"
-		: direct ? "direct" : "glocal", doTree ? "tree" : "distance matrix");
+	printf("Goal: output %s chance-%scorrected %sANI %s %s %s RC\n", adj ? "adjusted" : "raw", 
+		doChance? "" : "un", ani? "" : "non-", global ? "global" : direct ? "direct" : 
+		local? "local" : "glocal", doTree ? "tree" : doSetClus ? "set clusters" : "distance matrix", 
+		doRC ? "with" : "without");
 	if (heur) printf("WARNING: Using lv %u setcov heuristic!\n", hlv);
 	char **HeadPack = malloc(profSz*sizeof(*HeadPack));
 	uint32_t *Lens = malloc(profSz*sizeof(*Lens));
@@ -89,86 +191,92 @@ void main(int argc, char *argv[]) {
 		}
 	}
 	uint32_t sugK = (31-__builtin_clz((totL+totL)/(N=i)))/2u + 1; //clz(totL/(N=i)+maxL)
-	printf("Avg. length: %lu, max = %lu. Sugg. K = %u\n", totL/N, maxL, sugK);
-	if (N < 2) {fputs("Sorry, need > 1 sequence!\n",stderr); exit(1);}
+	printf("Avg. length: %lu, max = %u. Sugg. K = %u\n", totL/N, maxL, sugK);
+	if (N < 2 && !f2) {
+		fputs("Sorry, need > 1 sequence!\n",stderr); 
+		if (!doTree && !doSetClus) {
+			// get name of ref and make faux dm
+			rewind(fp);
+			head = headO;
+			head = fgets(head,HEADLEN,fp);
+			fprintf(of,"\t%s%s",head+1,head+1);
+		}
+		exit(1);
+	}
 	uint32_t K = argc > 3 ? atoi(argv[3]) : sugK, PSZ, K1, FPSZ, FPSZH;
 	K = K < 16 ? K : 16, K = K > 4 ? K : 4, K1 = K - 1;
+	Kspace_denom = (uint64_t)1 << (2*K);
+	if (doRC) Kspace_denom = Kspace_denom/2 + ((K & 1) ? 0 : (1 << (K-1))); // palindrome support
+	K_recip = 1. / K, rspace = 1./Kspace_denom; // GLOBALS
 	PSZ = 2*K-3; FPSZ = 1 << (PSZ-3), FPSZH = FPSZ >> hlv; 
 	FPSZH += !FPSZH;
 	printf("Running with K = %u [H = %u]\n",K,FPSZH);
 	HeadPack = realloc(HeadPack,N*sizeof(*HeadPack));
 	Lens = realloc(Lens,N*sizeof(*Lens));
 	uint32_t *Pops = malloc(N*sizeof(*Pops));
+	double *GC = malloc(sizeof(*GC)*N), *ND = malloc(sizeof(*ND)*N);
 	uint64_t **ProfPack = malloc(N*sizeof(*ProfPack));
 	uint64_t *ProfDump = calloc((uint64_t)N*FPSZ,sizeof(*ProfDump));
 	if (!ProfPack || !Pops || !ProfDump) {fputs("OOM:Dump\n",stderr); exit(3);}
 	for (uint64_t j = 0; j < N; ++j) ProfPack[j] = ProfDump + j*FPSZ;
 	i = fx = 0, head = headO, seq = seqO;
 	rewind(fp);
+	uint32_t maxPop = 0, whichMaxPop = 0;
 	while (head = fgets(head,HEADLEN,fp)) {
 		seq = fgets(seq,SEQLEN,fp);
 		seq[Lens[i]-1] = 0;
 		uint8_t *P = (uint8_t *)ProfPack[fx];
 		uint32_t fp = 0, len = Lens[i];
 		uint16_t re = (uint16_t)-1 << (16 - K);
+		uint32_t totGC = 0, totN = 0;
 		#pragma omp parallel
 		{
-			#pragma omp for schedule(dynamic,192)
+			#pragma omp for schedule(dynamic,256) reduction(+:totGC,totN)
 			for (uint32_t j = K1; j < len; ++j) {
-				#ifndef __SSE4_2__
-				#define _mm_popcnt_u64 __builtin_popcountll
 				char *s = seq + j - K1;
-				uint32_t w = 0;
+				uint32_t w = 0, wrc = 0;
+				uint32_t testLet = CONV[seq[j-K1] & 31];
+				if (testLet == 1 || testLet == 2) ++totGC;
+				else if (testLet > 3) ++totN;
+				
 				for (uint32_t k = 0; k < K; ++k) {
 					uint32_t x = CONV[s[k] & 31];
 					if (x > 3u) goto ENDR;
 					w |= x << (k << 1);
 				}
-				#else
-				__m128i s = _mm_lddqu_si128((void*)(seq+j-K1));
-				s = _mm_and_si128(s,_mm_set1_epi8(31));
-				__m128i xa = _mm_cmpeq_epi8(s,_mm_set1_epi8(1));
-				__m128i xc = _mm_cmpeq_epi8(s,_mm_set1_epi8(3));
-				__m128i xg = _mm_cmpeq_epi8(s,_mm_set1_epi8(7));
-				__m128i xt = _mm_cmpeq_epi8(s,_mm_set1_epi8(20));
-				__m128i r1 = _mm_or_si128(xa,xc), r2 = _mm_or_si128(xg,xt);
-				r1 = _mm_or_si128(r1,r2);
-				uint16_t r = (uint16_t)_mm_movemask_epi8(r1) << (16-K);
-				if (r != re) continue;
-				__m128i zc = _mm_and_si128(xc,_mm_set1_epi8(1));
-				__m128i zg = _mm_and_si128(xg,_mm_set1_epi8(2));
-				__m128i zt = _mm_and_si128(xt,_mm_set1_epi8(3));
-				zc = _mm_or_si128(zc,zg);
-				__m128i a = _mm_or_si128(zc,zt);
-				a = _mm_and_si128(a,MSK[K1]);
-				
-				__m128i s1 = _mm_cvtepu8_epi32(a),
-					s2 = _mm_cvtepu8_epi32(_mm_srli_si128(a,4)),
-					s3 = _mm_cvtepu8_epi32(_mm_srli_si128(a,8)),
-					s4 = _mm_cvtepu8_epi32(_mm_srli_si128(a,12));
-				s1 = _mm_mullo_epi32(s1,_mm_setr_epi32(1,1<<2,1<<4,1<<6));
-				s2 = _mm_mullo_epi32(s2,_mm_setr_epi32(1<<8,1<<10,1<<12,1<<14));
-				s3 = _mm_mullo_epi32(s3,_mm_setr_epi32(1<<16,1<<18,1<<20,1<<22));
-				s4 = _mm_mullo_epi32(s4,_mm_setr_epi32(1<<24,1<<26,1<<28,1<<30));
-				s1 = _mm_or_si128(s1,s2);
-				s2 = _mm_or_si128(s3,s4);
-				s1 = _mm_or_si128(s1,s2);
-				s1 = _mm_or_si128(s1,_mm_srli_si128(s1,8));
-				s1 = _mm_or_si128(s1,_mm_srli_si128(s1,4));
-				uint32_t w = _mm_extract_epi32(s1,0); 
-				#endif
-				
+				if (doRC) {
+					for (int k = K1; k >= 0; k--) {
+						uint32_t x = RCONV[s[k] & 31];
+						wrc |= x << ((K1-k) << 1);
+					}
+					//#pragma omp atomic
+					//P[wrc >> 3] |= 1 << (wrc & 7); 
+					if (wrc < w) w = wrc;
+				}
+
 				#pragma omp atomic
 				P[w >> 3] |= 1 << (w & 7); 
 				ENDR:NULL;
+			}
+			#pragma omp single
+			for (uint32_t j = len-K1; j < len; ++j) {
+				uint32_t testLet = CONV[seq[j-K1] & 31];
+				if (testLet == 1 || testLet == 2)
+					++totGC;
+				else if (testLet > 3) ++totN;
 			}
 			uint64_t *Agg = ProfPack[fx];
 			#pragma omp for reduction(+:fp)
 			for (uint32_t j = 0; j < FPSZ; ++j)
 				fp += _mm_popcnt_u64(Agg[j]);
 		}
-		printf("[%u (%u)] L = %u, Density = %u [%f], Entropy = %f\n",i, fx, len, fp, 
-			(double)fp/((uint64_t)1 << (2*K)),(double)fp/len);
+		double newD = Kspace_denom;
+		double thisGC = (double)totGC / (double)(len-totN);
+		GC[i] = doGC ? thisGC : 0.5;
+		
+		printf("[%u (%u)] L = %u, Density = %u [%f], Entropy = %f, GC = %f\n",i, fx, len, fp, 
+			(double)fp/newD,(double)fp/len, thisGC);
+		if (fp > maxPop) maxPop = fp, whichMaxPop = fx;
 		if (!heur) Pops[fx++] = fp + !fp;
 		else { // Do heuristic search (direct==global here)
 			if (!fp) {free(HeadPack[i++]); continue;} 
@@ -193,11 +301,86 @@ void main(int argc, char *argv[]) {
 		++i;
 	}
 	N = fx;
-	printf("Done parsing %u (%u cls) sequences [%f]\n",i,N,omp_get_wtime()-wtime);
 	free(seqO); free(headO); free(Lens); fclose(fp);
 	if (N < i) ProfDump = realloc(ProfDump,(uint64_t)N*(1 << PSZ)),
 		ProfPack = realloc(ProfPack,N*sizeof(*ProfPack));
+	printf("Parsed %u (%lu cls) reference sequences [%f]\n",i,N,omp_get_wtime()-wtime);
+	
+	wtime = omp_get_wtime();
+	if (doSetClus) {
+		// Do greedy set coverage. 
+		uint32_t *Set = calloc(N,sizeof(*Set));
+		uint64_t *SetFP = calloc(FPSZ,sizeof(*SetFP));
+		uint8_t *Mask = calloc(N,sizeof(*Mask));
+		
+		Set[0] = whichMaxPop; Mask[whichMaxPop] = 1;
+		for (uint32_t i = 0; i < FPSZ; ++i) SetFP[i] = ProfPack[whichMaxPop][i];
+		uint32_t numSet = 1, setPop = maxPop, setInt = 0, setWhich = 0;
+		fprintf(of,"SeqID\tuniqKmers\tK_novelty\tKspace_sat\tAdj_dist\n");
+		fprintf(of,"%s\t%u\t%.9f\t%f\t%f\n",HeadPack[whichMaxPop],maxPop,1.0,
+			(double)maxPop/Kspace_denom, 1.);
+		
+		for (uint32_t z = 1; z < N; ++z) {
+			uint32_t oldSetPop = setPop;
+			#pragma omp parallel
+			{
+				//uint64_t *TestFP = calloc(FPSZ,sizeof(*TestFP));
+				uint32_t threadPop = setPop, threadInt = setInt,
+					threadWhich = 0;
+				// Find the bug that raises the setPop the most
+				#pragma omp for schedule(dynamic)
+				for (uint32_t i = 0; i < N; ++i) {
+					if (Mask[i]) continue; // skip those already in the pot
+					//for (uint32_t i = 0; i < FPSZ; ++i) TestFP[i] = SetFP[i];
+					uint32_t unn = 0, its = 0;
+					uint64_t *Agg = ProfPack[i];
+					#pragma omp simd reduction(+:its)
+					for (uint32_t j = 0; j < FPSZ; ++j) 
+						its += _mm_popcnt_u64(SetFP[j] & Agg[j]);
+					unn = oldSetPop + Pops[i] - its;
+					if (unn > threadPop) {
+						threadPop = unn, threadWhich = i;
+						threadInt = its;
+					}
+				}
+				#pragma omp critical
+				if (threadPop > setPop || (threadPop == setPop && threadInt < setInt))
+					setPop = threadPop, setInt = threadInt, setWhich = threadWhich;
+			}
+			uint64_t *Agg = ProfPack[setWhich];
+			#pragma omp parallel for
+			for (uint32_t i = 0; i < FPSZ; ++i) SetFP[i] |= Agg[i]; // dump into master bin
+			
+			// expectation management
+			uint32_t h = oldSetPop, l = Pops[setWhich], t;
+			if (l > h) t = l, l = h, h = t;
+			uint32_t its = setInt, unn = setPop;
+			double chance = rspace * (double)l * (double)h;
+			chance = chance > its ? its : chance;
+			double denom = (double)unn * (double)l/h;
+			its -= chance; denom -= chance;
+			denom = denom > 1 ? denom : 1.; 
+			double sim = (double)its / denom, dist = 1.0 - sim;
+			dist = 1. - (1. + K_recip*log(2*sim/(1. + sim)));
+			dist = dist > 1 ? 1 : dist;
 
+			fprintf(of,"%s\t%u\t%.9f\t%f\t%f\n",HeadPack[setWhich],setPop,
+				1.0-(double)oldSetPop/setPop,(double)setPop/Kspace_denom,dist);
+			Set[numSet++] = setWhich; Mask[setWhich] = 1;
+			
+			if (!noCut && 1.0-(double)oldSetPop/setPop < 0.001) {
+				printf("Reached .001 information gain at %u.\n",numSet);
+				break;
+			} else if (oldSetPop == setPop) {
+				printf("Reached 0 information gain at %u.\n",numSet);
+				break;
+			}
+		}
+		
+		printf("Finished set clustering [%f s].\n",omp_get_wtime() - wtime);
+		exit(0);
+	}
+	
 	if (doTree) {
 		typedef union {uint32_t i; float f;} if_t;
 		void *DD_init, *R_init, *X_init;
@@ -216,76 +399,19 @@ void main(int argc, char *argv[]) {
 		for (uint64_t i = 0; i < NSZ; ++i)
 			DD[i] = FLT_MAX; // Pad the end with infinity 
 		memset(R+N-1,0,16*sizeof(*R)); 
-		wtime = omp_get_wtime();
-		if (K > 4) {
-			#pragma omp parallel for schedule(guided)
-			for (uint32_t j = 1; j < N; ++j) {
-				uint64_t *F = ProfPack[j];
-				for (uint32_t k = 0; k < j; ++k) {
-					uint64_t its = 0, *S = ProfPack[k];
-					for (uint32_t z = 0; z < FPSZ; z+=8) {
-						uint64_t a1 = F[z] & S[z], a2 = F[z+1] & S[z+1], 
-							a3 = F[z+2] & S[z+2], a4 = F[z+3] & S[z+3], 
-							a5 = F[z+4] & S[z+4], a6 = F[z+5] & S[z+5], 
-							a7 = F[z+6] & S[z+6], a8 = F[z+7] & S[z+7],
-							p1 = _mm_popcnt_u64(a1), p2 = _mm_popcnt_u64(a2),
-							p3 = _mm_popcnt_u64(a3), p4 = _mm_popcnt_u64(a4),
-							p5 = _mm_popcnt_u64(a5), p6 = _mm_popcnt_u64(a6),
-							p7 = _mm_popcnt_u64(a7), p8 = _mm_popcnt_u64(a8);
-						its += p1+p2+p3+p4+p5+p6+p7+p8; 
-					}
-					float denom;
-					if (direct) denom = Pops[j] + Pops[k] - its;
-					else { 
-						uint32_t h, l;
-						if (Pops[j] > Pops[k]) h = Pops[j], l = Pops[k];
-						else h = Pops[k], l = Pops[j];
-						denom = global ? h : l;
-					}
-					D[j][k] = 1.f - (float)its / denom;
-				}
-			}
-		} else { // K = 4 special case (no z loop)
-			#pragma omp parallel for schedule(guided)
-			for (uint32_t j = 1; j < N; ++j) {
-				uint64_t *F = ProfPack[j];
-				for (uint32_t k = 0; k < j; ++k) {
-					uint64_t *S = ProfPack[k];
-					uint64_t a1 = F[0] & S[0], a2 = F[1] & S[1], 
-						a3 = F[2] & S[2], a4 = F[3] & S[3], 
-						p1 = _mm_popcnt_u64(a1), p2 = _mm_popcnt_u64(a2),
-						p3 = _mm_popcnt_u64(a3), p4 = _mm_popcnt_u64(a4);
-					uint64_t its = p1+p2+p3+p4; 
-					float denom;
-					if (direct) denom = Pops[j] + Pops[k] - its;
-					else { 
-						uint32_t h, l;
-						if (Pops[j] > Pops[k]) h = Pops[j], l = Pops[k];
-						else h = Pops[k], l = Pops[j];
-						denom = global ? h : l;
-					}
-					D[j][k] = 1.f - (float)its / denom;
-				}
+		
+		for (uint32_t j = 1; j < N; ++j) {
+			uint64_t *F = ProfPack[j]; float *FC = D[j];
+			#pragma omp parallel for schedule(dynamic)
+			for (uint32_t k = 0; k < j; ++k) {
+				uint64_t its = 0, *S = ProfPack[k];
+				for (uint32_t z = 0; z < FPSZ; ++z) 
+					its += _mm_popcnt_u64(F[z] & S[z]);
+				FC[k] = calc_dist(Pops[j],Pops[k],GC[j],GC[k],its,Pops[j]+Pops[k]-its,
+					doChance,doGC,ani,direct,adj,global,local);
 			}
 		}
-		if (adj) { // LBA fix 
-			float s = (uint64_t)1 << (K << 1), s_r = 1.f/s;
-			#pragma omp parallel for schedule(guided)
-			for (uint32_t j = 1; j < N; ++j) 
-				for (uint32_t k = 0; k < j; ++k) {
-					float nu;
-					if (direct) nu = (float)Pops[j]*Pops[k]/(Pops[j]+Pops[k]);
-					else {
-						uint32_t h, l;
-						if (Pops[j] > Pops[k]) h = Pops[j], l = Pops[k];
-						else h = Pops[k], l = Pops[j];
-						nu = global ? l : h;
-					}
-					float rd = 1.f - nu*s_r;
-					D[j][k] = D[j][k] >= rd ? 1 : D[j][k]/rd;
-					D[j][k] = D[j][k] <= .9999546f ? -logf(1-D[j][k]) : 10.f;
-				}
-		}
+		
 		free(ProfDump); free(ProfPack); free(Pops);
 		printf("Calculated distance matrix [%f]\n",omp_get_wtime()-wtime);
 		
@@ -318,7 +444,7 @@ void main(int argc, char *argv[]) {
 				#pragma omp for reduction(min:min) schedule(guided)
 				for (uint32_t i = 1; i < n; ++i) {
 					float *Di = __builtin_assume_aligned(D[i],64), 
-						Ri = __builtin_assume_aligned(R[i],64);
+						Ri = R[i];
 					for (uint32_t j = 0; j < i; ++j) {
 						float t = Di[j] - (Ri + R[j]);
 						if (t <= min) min = tmin = t, tmi = i, tmj = j;
@@ -328,11 +454,6 @@ void main(int argc, char *argv[]) {
 			}
 			for (uint32_t i = 0; i < THREADS; ++i) //if (TI[i]) // rm, mi 0, < to >
 				if (TI[i] > mi) mi = TI[i], mj = TJ[i];
-			// #elif __AVX512F__
-			// __m512 gmin = _mm512_set1_ps(FLT_MAX);
-			// __m512i grow = _mm512_set1_epi32(0), gcol = grow;
-			// __m512 TMIN[THREADS];
-			// __m512i TI[THREADS], TJ[THREADS];
 			#else
 			__m256 gmin = _mm256_set1_ps(FLT_MAX);
 			__m256 grow = _mm256_castsi256_ps(_mm256_set1_epi32(0)), gcol = grow;
@@ -482,47 +603,119 @@ void main(int argc, char *argv[]) {
 		}
 		fprintf(of, "(%s:%.5f,%s:%.5f);\n", HeadPack[0], D[1][0]/2.f, HeadPack[1], D[1][0]/2.f);
 		printf("Finished tree construction [%f]\n",omp_get_wtime()-wtime);
-		exit(1); 
+		exit(0); 
 	}
 	
-	for (uint32_t j = 0; j < N; ++j) fprintf(of,"\t%s",HeadPack[j]);
-	fputc('\n',of);
-	float *FC = malloc(N*sizeof(*FC)),
-		s = (uint64_t)1 << (K << 1), s_r = 1.f/s;
+	// Write the distance matrix
+	wtime = omp_get_wtime();
+	if (!doMin2) {
+		for (uint32_t j = 0; j < N; ++j) fprintf(of,"\t%s",HeadPack[j]);
+		fputc('\n',of);
+	}
+	float *FC = malloc(N*sizeof(*FC));
+	// Do F2 tally
+	if (f2) {
+		uint64_t nF2 = 0;
+		uint64_t bufSz = INT32_MAX-1;
+		uint8_t *line = malloc(bufSz + 1);
+		double *DistQ = malloc(N*sizeof(*DistQ));
+		
+		uint32_t K1_2 = K1<<1, shifty = (32 - 2*K);
+		
+		uint8_t **QBones = malloc(omp_get_max_threads()*sizeof(*QBones));
+		#pragma omp parallel
+		{
+			int tid = omp_get_thread_num();
+			QBones[tid] = calloc((uint64_t)1 << (2*K-3),1);
+		}
+		
+		while (fgets(line,bufSz,f2)) {
+			int hlen = strlen(line);
+			line[hlen-1] = 0;
+			fprintf(of,"%s",line+1);
+
+			fgets(line,bufSz,f2);
+			int len = strlen(line);
+			line[len-1] = 0;
+
+			#pragma omp parallel
+			{
+				int tid = omp_get_thread_num();
+				uint8_t *QBone = QBones[tid];
+
+				#pragma omp for schedule(dynamic,1)
+				for (uint32_t i = 0; i < N; ++i) {
+					uint8_t *R = (uint8_t *)ProfPack[i];
+					int its = 0; int nGC = 0, nAmbig = 0;
+					uint32_t w = 0, nGood = 0, wrc = 0, tot = 0;
+					for (int j = 0; j < len; ++j) {
+						w >>= 2;
+						uint8_t x = CONV[line[j] & 31];
+						if (x > 3) x = 0, nGood=0, ++nAmbig;
+						else ++nGood, nGC += (x==1 || x==2);
+						w |= x << K1_2;
+						uint32_t cand = w << shifty >> shifty, rcand;
+						if (doRC) wrc <<= 2, wrc |= 3-x,
+							rcand = wrc << shifty >> shifty,
+							cand = cand < rcand ? cand : rcand;
+						if (nGood >= K && !(QBone[cand >> 3] & (1 << (cand & 7))) ) {
+							QBone[cand >> 3] |= 1 << (cand & 7);
+							++tot;
+							its += (R[cand >> 3] & (1 << (cand & 7))) != 0;
+						}
+					}
+					w = 0, wrc = 0;
+					for (int j = 0; j < len; ++j) {
+						w >>= 2;
+						uint8_t x = CONV[line[j] & 31] & 3;
+						w |= x << K1_2;
+						uint32_t cand = w << shifty >> shifty, rcand;
+						if (doRC) wrc <<= 2, wrc |= 3-x,
+							rcand = wrc << shifty >> shifty,
+							cand = cand < rcand ? cand : rcand;
+						QBone[cand >> 3] = 0;
+					}
+					int comboPop = Pops[i] + tot;
+					if (its > comboPop) its = comboPop;
+					int unn = comboPop - its;
+					double gc = doGC ? (double)nGC / (len-nAmbig) : 0.5;
+					//printf("GC = %f\n",gc);
+					DistQ[i]=calc_dist(Pops[i],tot,GC[i],gc,its,unn,doChance,doGC,ani,direct,adj,global,local);
+				}
+			}
+			if (doMin2) {
+				double min = INFINITY, min2 = INFINITY; 
+				int minIx = 0, minIx2 = 0;
+				for (int i = 0; i < N; ++i) {
+					if (DistQ[i] < min) 
+						min2 = min, minIx2 = minIx,
+						min = DistQ[i], minIx = i;
+					else if (DistQ[i] < min2)
+						min2 = DistQ[i], minIx2 = i;
+				}
+				fprintf(of,"\t%s\t%f\t%s\t%f",HeadPack[minIx],min,HeadPack[minIx2],min2);
+			} else for (int i = 0; i < N; ++i) fprintf(of,"\t%.5g",DistQ[i]);
+			fputc('\n',of);
+			++nF2;
+		}
+		printf("Processed %lu query sequences [%f]\n",nF2,omp_get_wtime()-wtime);
+		exit(0);
+	}
+
 	for (uint32_t j = 0; j < N; ++j) {
 		uint64_t *F = ProfPack[j];
 		fprintf(of,"%s",HeadPack[j]);
-		#pragma omp parallel for
+		#pragma omp parallel for schedule(dynamic)
 		for (uint32_t k = 0; k < j; ++k) {
 			uint64_t *S = ProfPack[k];
 			uint32_t its = 0;
 			for (uint32_t z = 0; z < FPSZ; ++z)
 				its += _mm_popcnt_u64(F[z] & S[z]);
-			float denom;
-			if (direct) denom = Pops[j] + Pops[k] - its;
-			else { 
-				uint32_t h, l;
-				if (Pops[j] > Pops[k]) h = Pops[j], l = Pops[k];
-				else h = Pops[k], l = Pops[j];
-				denom = global ? h : l;
-			}
-			FC[k] = 1.f - (float)its / denom;
-			if (adj) { // LBA fix 
-				float nu;
-				if (direct) nu = (float)Pops[j]*Pops[k]/(Pops[j]+Pops[k]);
-				else {
-					uint32_t h, l;
-					if (Pops[j] > Pops[k]) h = Pops[j], l = Pops[k];
-					else h = Pops[k], l = Pops[j];
-					nu = global ? l : h;
-				}
-				float rd = 1.f - nu*s_r;
-				FC[k] = FC[k] >= rd ? 1 : FC[k]/rd;
-				FC[k] = FC[k] <= .9999546f ? -logf(1-FC[k]) : 10.f;
-			}
+			FC[k] = calc_dist(Pops[k],Pops[j],GC[k],GC[j],its,Pops[k]+Pops[j]-its,
+				doChance,doGC,ani,direct,adj,global,local);
 		}
-		for (uint32_t k = 0; k < j; ++k) fprintf(of,"\t%.4f",FC[k]);
+		for (uint32_t k = 0; k < j; ++k) fprintf(of,"\t%.5g",FC[k]);
 		fputs("\n",of);
-		//fputs("\t1.000\n",of); // omit?
 	}
+	printf("Finished distance matrix write [%f]\n",omp_get_wtime()-wtime);
 }
