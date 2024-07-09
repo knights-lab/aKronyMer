@@ -48,7 +48,7 @@ aKronyMer inseqs.lin.fna output [K] [Q queries.lin.fna [MIN2]] [HEUR[0-9]] [ANI]
    - Recommended values:
      - Phage genomes: K = 10
      - Bacterial genomes: K = 13
-     - Metagenomes or raw (R1) shallow metagenome samples: K = 14
+     - Metagenomes or raw (R1) shallow metagenome samples: K = 14-16
      - Amplicons (16S, ITS, etc.): K = 7 (omit RC option)
 
 ## Modes and Options
